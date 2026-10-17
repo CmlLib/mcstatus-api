@@ -24,7 +24,7 @@ ADDRESS = "example.com:25565"
 
 
 class TestCache(InMemoryBackend):
-    """시간을 직접 진행시켜 실제 캐시 데코레이터의 만료 정책을 검증한다."""
+    """Advance time explicitly to verify expiration through the real cache decorator."""
 
     def __init__(self):
         self._store = {}
@@ -268,7 +268,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[1], b"\x00")
 
     async def test_real_tcp_connection_refusal_is_offline(self):
-        # 소켓을 바인딩하되 listen하지 않아 접속 거부를 재현한다.
+        # Bind without listening to reproduce a refused connection.
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
