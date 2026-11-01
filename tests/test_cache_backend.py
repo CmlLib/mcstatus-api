@@ -3,25 +3,23 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.inmemory import InMemoryBackend
-from fastapi_cache.backends.redis import RedisBackend
 from mcstatus import JavaServer
 from mcstatus.status_response import JavaStatusResponse
 
 from app import main as api
+from app.cache import MemoryCacheBackend, RedisCacheBackend
 
 
 class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        FastAPICache.reset()
-        self.addCleanup(FastAPICache.reset)
-        memory_backend = InMemoryBackend()
-        await memory_backend.clear(namespace="mcstatus-api-cache")
-        self.addAsyncCleanup(
-            memory_backend.clear,
-            namespace="mcstatus-api-cache",
+        cache_patch = patch.object(
+            api.app.state,
+            "status_cache",
+            None,
+            create=True,
         )
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
     async def test_memory_caches_responses_without_creating_redis_client(self):
         status = JavaStatusResponse.build(
@@ -42,7 +40,7 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
             patch.object(api.JavaServer, "async_lookup", lookup),
         ):
             async with api.lifespan(api.app):
-                self.assertIsInstance(FastAPICache.get_backend(), InMemoryBackend)
+                self.assertIsInstance(api.app.state.status_cache.backend, MemoryCacheBackend)
                 async with httpx.AsyncClient(
                     transport=httpx.ASGITransport(app=api.app),
                     base_url="http://test",
@@ -69,7 +67,6 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
         ]
         for environment, expected_url in configurations:
             with self.subTest(environment=environment):
-                FastAPICache.reset()
                 redis = MagicMock()
                 redis.close = AsyncMock()
 
@@ -82,11 +79,11 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
                     ) as factory,
                 ):
                     async with api.lifespan(api.app):
-                        self.assertIsInstance(FastAPICache.get_backend(), RedisBackend)
+                        self.assertIsInstance(api.app.state.status_cache.backend, RedisCacheBackend)
                         factory.assert_called_once_with(expected_url)
                         redis.close.assert_not_awaited()
 
-                redis.close.assert_awaited_once()
+                redis.close.assert_awaited_once_with(close_connection_pool=True)
 
     async def test_invalid_backend_fails_startup_without_creating_redis_client(self):
         with (
@@ -99,7 +96,7 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
 
             factory.assert_not_called()
 
-        self.assertIsNone(FastAPICache._backend)
+        self.assertIsNone(api.app.state.status_cache)
 
 
 if __name__ == "__main__":

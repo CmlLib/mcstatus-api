@@ -24,7 +24,7 @@ Redis 없이 인메모리 캐시로 API만 실행하려면 다음 명령을 사�
 CACHE_BACKEND=memory docker compose up -d mcstatus-api
 ```
 
-인메모리 캐시는 프로세스별로 독립적이며 재시작하면 초기화됩니다. 만료 항목은 해당 키를 다시 조회할 때 삭제되며, 용량 제한은 없습니다.
+인메모리 캐시는 프로세스별로 독립적이며 재시작하면 초기화됩니다. 최대 10,000개를 보관하고, 저장 시 만료 항목과 가장 오래 사용하지 않은 항목을 정리합니다.
 
 ```bash
 # Check status and logs
@@ -58,5 +58,8 @@ docker compose down
 - DNS 조회와 status 요청을 합쳐 3초로 제한합니다.
 - 접속 가능·불가 결과를 선택한 백엔드에 60초 캐싱합니다. 캐시 응답은 기존 측정값과 시각을 유지합니다.
 - 4xx/5xx 오류는 캐싱하지 않습니다.
-- `X-FastAPI-Cache: HIT/MISS`로 캐시 사용 여부를 확인할 수 있습니다.
+- `X-Cache: HIT/MISS/BYPASS`로 캐시 재사용·신규 저장·우회를 구분합니다. 기존 `X-FastAPI-Cache`도 같은 값을 제공합니다.
+- `X-Cache-Created-At`은 캐시 저장 시각(UTC)이며 HIT에서도 유지됩니다. 저장하지 않은 응답에는 포함하지 않습니다.
+- `Cache-Control: max-age=<남은 초>`와 `ETag`를 제공합니다. 조건부 요청은 304를 반환할 수 있습니다.
+- 요청의 `Cache-Control: no-cache`는 재조회 후 캐시를 갱신하며, `no-store`는 캐시 조회·저장을 모두 생략합니다.
 - Redis 읽기·쓰기 실패는 로그에 기록하며, 캐시 없이 실제 조회 결과를 반환합니다.
