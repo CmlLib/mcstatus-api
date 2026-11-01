@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -109,6 +110,7 @@ class StatusCache:
     def __init__(self, backend: CacheBackend, expire: int = 60):
         self.backend = backend
         self.expire = expire
+        self._inflight: dict[str, asyncio.Task[Response]] = {}
 
     async def respond(
         self,
@@ -117,6 +119,36 @@ class StatusCache:
     ) -> Response:
         address_hash = hashlib.sha256(address.encode("utf-8"))
         cache_key = address_hash.hexdigest()
+        task = self._inflight.get(cache_key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._respond(address, cache_key, query))
+            self._inflight[cache_key] = task
+            task.add_done_callback(lambda completed: self._finish_query(cache_key, completed))
+
+        # A disconnected client must not cancel the lookup shared by other clients.
+        return await asyncio.shield(task)
+
+    def _finish_query(self, cache_key: str, task: asyncio.Task[Response]) -> None:
+        if self._inflight.get(cache_key) is task:
+            del self._inflight[cache_key]
+
+        # Observe failures even when all clients stopped waiting for this task.
+        if not task.cancelled():
+            task.exception()
+
+    async def close(self) -> None:
+        tasks = list(self._inflight.values())
+        for task in tasks:
+            task.cancel()
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _respond(
+        self,
+        address: str,
+        cache_key: str,
+        query: Callable[[str], Awaitable[object]],
+    ) -> Response:
         read_failed = False
 
         try:

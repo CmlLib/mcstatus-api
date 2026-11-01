@@ -44,10 +44,12 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     else:
         raise ValueError("CACHE_BACKEND must be 'memory' or 'redis'")
 
+    status_cache = StatusCache(backend, expire=CACHE_TTL_SECONDS)
     try:
-        application.state.status_cache = StatusCache(backend, expire=CACHE_TTL_SECONDS)
+        application.state.status_cache = status_cache
         yield
     finally:
+        await status_cache.close()
         if redis is not None:
             await redis.close(close_connection_pool=True)
 
