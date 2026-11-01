@@ -1,6 +1,6 @@
 # MCStatus API
 
-Minecraft Java 서버의 접속 가능 여부와 상태를 조회하는 API입니다. Python 3.10을 사용하며, Redis 또는 인메모리 캐시를 선택할 수 있습니다.
+Minecraft Java 서버의 접속 가능 여부와 상태를 조회하는 API입니다. Python 3.14를 사용하며, Redis 또는 인메모리 캐시를 선택할 수 있습니다.
 
 ## 실행·배포
 

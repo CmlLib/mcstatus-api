@@ -88,7 +88,11 @@ class LiveRedisCacheTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(reader.close, close_connection_pool=True)
         key_id = uuid.uuid4()
         key = key_id.hex
-        self.addAsyncCleanup(writer.delete, CACHE_PREFIX + key)
+
+        async def delete_entry():
+            await writer.delete(CACHE_PREFIX + key)
+
+        self.addAsyncCleanup(delete_entry)
         entry = CacheEntry(body=b'{"result":true}', created_at=datetime.now(timezone.utc))
         write_backend = RedisCacheBackend(writer)
         read_backend = RedisCacheBackend(reader)
