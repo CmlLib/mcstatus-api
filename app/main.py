@@ -17,9 +17,13 @@ from mcstatus import JavaServer
 from mcstatus.address import Address
 from redis import asyncio as aioredis
 
-from app.cache import MemoryCacheBackend, RedisCacheBackend, StatusCache
+from app.cache import (
+    CACHE_TTL_SECONDS,
+    MemoryCacheBackend,
+    RedisCacheBackend,
+    StatusCache,
+)
 
-CACHE_TTL_SECONDS = 60
 QUERY_TIMEOUT_SECONDS = 3
 
 logging.basicConfig(

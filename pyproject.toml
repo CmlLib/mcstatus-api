@@ -3,25 +3,17 @@ name = "mcstatus-api"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "AlphaBs",email = "ksi123456ab@naver.com"}
+    {name = "AlphaBs", email = "ksi123456ab@naver.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "uvicorn (>=0.38.0,<1.0.0)",
-    "mcstatus (>=11.1.1,<12.0.0)",
-    "redis (>=4.6.0,<5.0.0)",
-    "pydantic (>=2.12.0,<3.0.0)",
-    "fastapi[standard] (>=0.118.3,<1.0.0)"
+    "uvicorn>=0.38.0,<1.0.0",
+    "mcstatus>=11.1.1,<12.0.0",
+    "redis>=4.6.0,<5.0.0",
+    "pydantic>=2.12.0,<3.0.0",
+    "fastapi[standard]>=0.118.3,<1.0.0",
 ]
 
-
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry]
-package-mode = false
-
-[tool.poetry.dependencies]
-python = ">=3.14,<3.15"  # used for locking dependencies
+[tool.uv]
+package = false

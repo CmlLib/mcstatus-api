@@ -14,7 +14,8 @@ from fastapi.responses import JSONResponse
 from redis import asyncio as aioredis
 
 logger = logging.getLogger(__name__)
-CACHE_PREFIX = "mcstatus-api:status:v1:"
+CACHE_PREFIX = "mcstatus-api:status:v2:"
+CACHE_TTL_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,7 @@ class RedisCacheBackend:
 
 
 class StatusCache:
-    def __init__(self, backend: CacheBackend, expire: int = 60):
+    def __init__(self, backend: CacheBackend, expire: int = CACHE_TTL_SECONDS):
         self.backend = backend
         self.expire = expire
         self._inflight: dict[str, asyncio.Task[Response]] = {}

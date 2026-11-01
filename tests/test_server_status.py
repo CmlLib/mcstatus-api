@@ -175,14 +175,14 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         created_at = first.headers["X-Cache-Created-At"]
         self.assertIsNotNone(datetime.fromisoformat(created_at).tzinfo)
         self.status.latency = 99
-        self.backend.now += 59
+        self.backend.now += 9
         cached = await self.request()
         self.assertEqual(cached.headers["X-Cache"], "HIT")
         self.assertEqual(cached.headers["X-Cache-Created-At"], created_at)
         self.assertEqual(cached.json(), first.json())
         self.lookup.assert_awaited_once()
 
-        self.backend.now += 2
+        self.backend.now += 1
         refreshed = await self.request()
         self.assertEqual(refreshed.headers["X-Cache"], "MISS")
         self.assertNotEqual(refreshed.headers["X-Cache-Created-At"], created_at)
@@ -199,7 +199,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.headers["X-Cache"], "HIT")
         self.lookup.assert_awaited_once()
 
-        self.backend.now += 61
+        self.backend.now += 10
         refreshed = await self.request()
         self.assertTrue(refreshed.json()["result"])
 
