@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    try:
+        cache_ttl = int(os.getenv("CACHE_TTL_SECONDS", str(CACHE_TTL_SECONDS)))
+    except ValueError as exc:
+        raise ValueError("CACHE_TTL_SECONDS must be a positive integer") from exc
+
+    if cache_ttl <= 0:
+        raise ValueError("CACHE_TTL_SECONDS must be a positive integer")
+
     cache_backend = os.getenv("CACHE_BACKEND", "redis")
     redis = None
 
@@ -48,7 +56,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     else:
         raise ValueError("CACHE_BACKEND must be 'memory' or 'redis'")
 
-    status_cache = StatusCache(backend, expire=CACHE_TTL_SECONDS)
+    status_cache = StatusCache(backend, expire=cache_ttl)
     try:
         application.state.status_cache = status_cache
         yield

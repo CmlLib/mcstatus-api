@@ -16,6 +16,7 @@ The API listens on port `8000`. After changing the code, rebuild the image and r
 | Environment variable | Default | Description |
 | --- | --- | --- |
 | `CACHE_BACKEND` | `redis` | `redis` or `memory`. Other values prevent startup. |
+| `CACHE_TTL_SECONDS` | `10` | Cache lifetime in seconds. Must be a positive integer. Invalid values prevent startup. |
 | `REDIS_URL` | `redis://localhost` | Connection URL when using Redis. Compose sets this to `redis://redis:6379`. |
 
 To run only the API with in-memory caching and no Redis:
@@ -62,10 +63,10 @@ docker compose down
 ## Queries and caching
 
 - DNS lookup and the status request have a combined timeout of 3 seconds.
-- Both reachable and unreachable results are cached for 10 seconds in the selected backend. Cached responses retain the original measurements and timestamp.
+- Both reachable and unreachable results are cached in the selected backend for `CACHE_TTL_SECONDS` (10 seconds by default). Cached responses retain the original measurements and timestamp.
 - Concurrent requests for the same address within one process share a single lookup. Responses sharing a new lookup all report `MISS`. Different addresses are queried in parallel. Requests are not coalesced across workers or containers.
 - HTTP 4xx/5xx errors are not cached.
 - `X-Cache: HIT/MISS/BYPASS` indicates a cached response, a newly stored result, or a cache bypass.
 - `X-Cache-Created-At` is the cache creation time in UTC, preserved on hits. It is omitted when the result is not stored.
-- Request cache directives and conditional request headers are ignored. The server always uses its 10-second TTL.
+- Request cache directives and conditional request headers are ignored. The server always uses its configured TTL.
 - Redis read/write failures are logged. The API returns the actual query result without caching.
