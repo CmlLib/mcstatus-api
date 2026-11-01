@@ -235,6 +235,102 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.json()["result"])
         self.assertIsNone(response.json()["status"])
 
+    async def test_system_dns_name_absence_is_offline_and_cached(self):
+        self.lookup.return_value = JavaServer("missing.invalid", 25565)
+        missing_name_errors = {socket.EAI_NONAME}
+        if hasattr(socket, "EAI_NODATA"):
+            missing_name_errors.add(socket.EAI_NODATA)
+
+        for error_code in missing_name_errors:
+            with self.subTest(error_code=error_code):
+                self.backend._store.clear()
+                connection = AsyncMock(
+                    side_effect=socket.gaierror(error_code, "Name or service not known"),
+                )
+                with patch("asyncio.open_connection", connection):
+                    response = await self.request()
+                    cached = await self.request()
+
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.json()["result"])
+                self.assertIsNone(response.json()["status"])
+                self.assertEqual(cached.json(), response.json())
+                self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
+                connection.assert_awaited_once()
+
+    async def test_temporary_system_dns_failure_is_not_offline_or_cached(self):
+        self.lookup.return_value = JavaServer("example.com", 25565)
+        connection = AsyncMock(
+            side_effect=socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
+        )
+        with patch("asyncio.open_connection", connection):
+            response = await self.request()
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"]["code"], "UPSTREAM_ERROR")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(self.backend._store, {})
+
+    async def request_real_status(self, raw):
+        closed = asyncio.Event()
+
+        async def handle(reader, writer):
+            try:
+                if raw is None:
+                    await read_packet(reader)
+                    await read_packet(reader)
+                    # TCP reset과 구분되는 정상적인 EOF를 전달한다.
+                    writer.write_eof()
+                    await reader.read()
+                    return
+
+                # mcstatus가 동일 연결에서 세 번 재시도하므로 매번 응답한다.
+                for _ in range(3):
+                    await read_packet(reader)
+                    await read_packet(reader)
+                    data = json.dumps(raw).encode()
+                    packet = b"\x00" + encode_varint(len(data)) + data
+                    writer.write(encode_varint(len(packet)) + packet)
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                closed.set()
+
+        listener = await asyncio.start_server(handle, "127.0.0.1", 0)
+        async with listener:
+            port = listener.sockets[0].getsockname()[1]
+            self.lookup.return_value = JavaServer("127.0.0.1", port)
+            response = await self.request()
+            await asyncio.wait_for(closed.wait(), timeout=1)
+
+        return response
+
+    async def test_real_tcp_eof_is_offline_and_cached(self):
+        response = await self.request_real_status(None)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["result"])
+        self.assertIsNone(response.json()["status"])
+
+        cached = await self.request()
+        self.assertEqual(cached.json(), response.json())
+        self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
+        self.lookup.assert_awaited_once()
+
+    async def test_real_malformed_status_is_upstream_error_and_not_cached(self):
+        malformed_responses = [
+            {},
+            {**RAW_STATUS, "players": None},
+            [],
+        ]
+        for raw in malformed_responses:
+            with self.subTest(raw=raw):
+                response = await self.request_real_status(raw)
+                self.assertEqual(response.status_code, 502)
+                self.assertEqual(response.json()["detail"]["code"], "UPSTREAM_ERROR")
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertEqual(self.backend._store, {})
+
     async def test_real_minecraft_status_exchange_measures_latency_without_ping(self):
         requests = []
         closed = asyncio.Event()
