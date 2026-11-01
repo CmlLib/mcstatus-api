@@ -16,9 +16,10 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         FastAPICache.reset()
         self.addCleanup(FastAPICache.reset)
-        await InMemoryBackend().clear(namespace="mcstatus-api-cache")
+        memory_backend = InMemoryBackend()
+        await memory_backend.clear(namespace="mcstatus-api-cache")
         self.addAsyncCleanup(
-            InMemoryBackend().clear,
+            memory_backend.clear,
             namespace="mcstatus-api-cache",
         )
 
@@ -35,19 +36,21 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
         server.async_status = AsyncMock(return_value=status)
         lookup = AsyncMock(return_value=server)
 
-        with patch.dict(os.environ, {"CACHE_BACKEND": "memory"}):
-            with patch.object(api.aioredis, "from_url") as redis_factory:
-                with patch.object(api.JavaServer, "async_lookup", lookup):
-                    async with api.lifespan(api.app):
-                        self.assertIsInstance(FastAPICache.get_backend(), InMemoryBackend)
-                        async with httpx.AsyncClient(
-                            transport=httpx.ASGITransport(app=api.app),
-                            base_url="http://test",
-                        ) as client:
-                            first = await client.get("/java/example.com:25565")
-                            cached = await client.get("/java/example.com:25565")
+        with (
+            patch.dict(os.environ, {"CACHE_BACKEND": "memory"}),
+            patch.object(api.aioredis, "from_url") as redis_factory,
+            patch.object(api.JavaServer, "async_lookup", lookup),
+        ):
+            async with api.lifespan(api.app):
+                self.assertIsInstance(FastAPICache.get_backend(), InMemoryBackend)
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=api.app),
+                    base_url="http://test",
+                ) as client:
+                    first = await client.get("/java/example.com:25565")
+                    cached = await client.get("/java/example.com:25565")
 
-                redis_factory.assert_not_called()
+            redis_factory.assert_not_called()
 
         self.assertEqual(first.status_code, 200)
         self.assertTrue(first.json()["result"])
@@ -69,23 +72,32 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
                 FastAPICache.reset()
                 redis = MagicMock()
                 redis.close = AsyncMock()
-                with patch.dict(os.environ, environment, clear=True):
-                    with patch.object(api.aioredis, "from_url", return_value=redis) as factory:
-                        async with api.lifespan(api.app):
-                            self.assertIsInstance(FastAPICache.get_backend(), RedisBackend)
-                            factory.assert_called_once_with(expected_url)
-                            redis.close.assert_not_awaited()
+
+                with (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch.object(
+                        api.aioredis,
+                        "from_url",
+                        return_value=redis,
+                    ) as factory,
+                ):
+                    async with api.lifespan(api.app):
+                        self.assertIsInstance(FastAPICache.get_backend(), RedisBackend)
+                        factory.assert_called_once_with(expected_url)
+                        redis.close.assert_not_awaited()
 
                 redis.close.assert_awaited_once()
 
     async def test_invalid_backend_fails_startup_without_creating_redis_client(self):
-        with patch.dict(os.environ, {"CACHE_BACKEND": "invalid"}):
-            with patch.object(api.aioredis, "from_url") as factory:
-                with self.assertRaisesRegex(ValueError, "CACHE_BACKEND"):
-                    async with api.lifespan(api.app):
-                        self.fail("잘못된 백엔드 설정으로 앱이 시작되어서는 안 된다.")
+        with (
+            patch.dict(os.environ, {"CACHE_BACKEND": "invalid"}),
+            patch.object(api.aioredis, "from_url") as factory,
+        ):
+            with self.assertRaisesRegex(ValueError, "CACHE_BACKEND"):
+                async with api.lifespan(api.app):
+                    self.fail("The app must not start with an invalid cache backend.")
 
-                factory.assert_not_called()
+            factory.assert_not_called()
 
         self.assertIsNone(FastAPICache._backend)
 

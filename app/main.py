@@ -76,7 +76,7 @@ async def internal_error_handler(request: Request, exc: Exception) -> JSONRespon
 
 
 def normalize_latency(latency: float | None) -> float | None:
-    # 측정된 0은 유지하고, 알 수 없는 값만 null로 변환한다.
+    # Preserve measured zero latency; only unknown or invalid values become null.
     if isinstance(latency, bool) or not isinstance(latency, (int, float)):
         return None
     if not math.isfinite(latency) or latency < 0:
@@ -87,6 +87,7 @@ def normalize_latency(latency: float | None) -> float | None:
 
 async def query_status(address: str):
     server = await JavaServer.async_lookup(address, timeout=QUERY_TIMEOUT_SECONDS)
+
     try:
         return await server.async_status()
     except socket.gaierror as exc:
@@ -98,14 +99,14 @@ async def query_status(address: str):
             raise ConnectionError(str(exc)) from exc
         raise
     except OSError as exc:
-        # mcstatus 11.1.1은 정상적인 EOF도 일반 OSError로 보고한다.
-        # 다른 프로토콜 오류까지 오프라인으로 처리하지 않도록 정확히 구분한다.
+        # mcstatus 11.1.1 reports an orderly EOF as a generic OSError.
+        # Match the exact error to avoid treating protocol errors as offline results.
         if exc.args == ("Socket did not respond with any information!",):
             raise ConnectionError(str(exc)) from exc
         raise
     except (KeyError, TypeError, ValueError) as exc:
-        # status 응답 파싱 오류는 외부 서버 오류로 변환한다.
-        # 주소 검증과 API 응답 직렬화에서 발생하는 오류는 이 범위에 포함하지 않는다.
+        # Treat status parsing failures as upstream errors.
+        # Keep address validation and API response serialization outside this scope.
         raise OSError("Received invalid Minecraft status response") from exc
 
 
@@ -130,7 +131,7 @@ async def get_java_server(address: str) -> JavaServerResponse:
 
     try:
         logger.info("Looking up server at address: %s", address)
-        # DNS 조회와 status 요청 전체에 하나의 제한 시간을 적용한다.
+        # Apply one timeout to the entire DNS lookup and status request.
         status = await asyncio.wait_for(query_status(address), timeout=QUERY_TIMEOUT_SECONDS)
     except (
         asyncio.TimeoutError,
@@ -147,7 +148,7 @@ async def get_java_server(address: str) -> JavaServerResponse:
             timestamp=datetime.now(timezone.utc),
         )
     except (OSError, DNSException) as exc:
-        # 프로토콜 및 조회 환경 오류를 오프라인 결과로 캐싱하지 않는다.
+        # Do not cache protocol or lookup infrastructure errors as offline results.
         logger.warning("Minecraft status query failed address=%s error=%s", address, exc)
         raise HTTPException(
             status_code=502,
@@ -155,7 +156,7 @@ async def get_java_server(address: str) -> JavaServerResponse:
             headers={"Cache-Control": "no-store"},
         ) from exc
 
-    # 기존 status 구조를 유지하고 유효하지 않은 지연 시간만 null로 변환한다.
+    # Preserve the status structure and serialize invalid latency as null.
     status_data = jsonable_encoder(status)
     status_data["latency"] = normalize_latency(status.latency)
     logger.info("Successfully retrieved status for server: %s", address)

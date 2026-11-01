@@ -62,9 +62,10 @@ async def read_packet(reader):
 
 class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        log_level = logging.getLogger().level
-        logging.getLogger().setLevel(logging.WARNING)
-        self.addCleanup(logging.getLogger().setLevel, log_level)
+        root_logger = logging.getLogger()
+        log_level = root_logger.level
+        root_logger.setLevel(logging.WARNING)
+        self.addCleanup(root_logger.setLevel, log_level)
         FastAPICache.reset()
         self.addCleanup(FastAPICache.reset)
         self.backend = TestCache()
@@ -114,7 +115,8 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_measured_zero_is_valid(self):
         self.status.latency = 0.0
-        self.assertEqual((await self.request()).json()["status"]["latency"], 0.0)
+        response = await self.request()
+        self.assertEqual(response.json()["status"]["latency"], 0.0)
 
     async def test_connection_failure_and_timeout_are_offline(self):
         for error in (ConnectionRefusedError("refused"), TimeoutError("timed out"), NXDOMAIN()):
@@ -136,8 +138,10 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("result", response.json())
         self.assertNotIn("private", response.text)
         self.assertEqual(self.backend._store, {})
+
         self.server.async_status.side_effect = None
-        self.assertTrue((await self.request()).json()["result"])
+        recovered = await self.request()
+        self.assertTrue(recovered.json()["result"])
 
     async def test_query_errors_are_not_offline_or_cached(self):
         for error in (OSError("Received invalid JSON"), NoNameservers()):
@@ -187,8 +191,10 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.json(), offline.json())
         self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
         self.lookup.assert_awaited_once()
+
         self.backend.now += 61
-        self.assertTrue((await self.request()).json()["result"])
+        refreshed = await self.request()
+        self.assertTrue(refreshed.json()["result"])
 
     async def test_null_latency_survives_cache_roundtrip(self):
         self.status.latency = None
@@ -225,7 +231,8 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dns_is_included_in_total_timeout(self):
         async def stalled_lookup(*args, **kwargs):
-            await asyncio.Event().wait()
+            lookup_finished = asyncio.Event()
+            await lookup_finished.wait()
 
         self.lookup.side_effect = stalled_lookup
         with patch.object(api, "QUERY_TIMEOUT_SECONDS", 0.02):
@@ -279,16 +286,17 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
                 if raw is None:
                     await read_packet(reader)
                     await read_packet(reader)
-                    # TCP reset과 구분되는 정상적인 EOF를 전달한다.
+                    # Send an orderly EOF rather than resetting the TCP connection.
                     writer.write_eof()
                     await reader.read()
                     return
 
-                # mcstatus가 동일 연결에서 세 번 재시도하므로 매번 응답한다.
+                # Respond to each of the three attempts mcstatus makes on the same connection.
                 for _ in range(3):
                     await read_packet(reader)
                     await read_packet(reader)
-                    data = json.dumps(raw).encode()
+                    raw_json = json.dumps(raw)
+                    data = raw_json.encode()
                     packet = b"\x00" + encode_varint(len(data)) + data
                     writer.write(encode_varint(len(packet)) + packet)
                     await writer.drain()
@@ -340,7 +348,8 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
                 requests.append(await read_packet(reader))
                 requests.append(await read_packet(reader))
                 await asyncio.sleep(0.03)
-                raw = json.dumps(RAW_STATUS).encode()
+                raw_json = json.dumps(RAW_STATUS)
+                raw = raw_json.encode()
                 packet = b"\x00" + encode_varint(len(raw)) + raw
                 writer.write(encode_varint(len(packet)) + packet)
                 await writer.drain()

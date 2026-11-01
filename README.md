@@ -27,11 +27,11 @@ CACHE_BACKEND=memory docker compose up -d mcstatus-api
 인메모리 캐시는 프로세스별로 독립적이며 재시작하면 초기화됩니다. 만료 항목은 해당 키를 다시 조회할 때 삭제되며, 용량 제한은 없습니다.
 
 ```bash
-# 상태 및 로그 확인
+# Check status and logs
 docker compose ps
 docker compose logs --tail=100 -f mcstatus-api redis
 
-# 종료
+# Stop services
 docker compose down
 ```
 
