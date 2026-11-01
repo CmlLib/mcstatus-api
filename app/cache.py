@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from redis import asyncio as aioredis
 
 logger = logging.getLogger(__name__)
-CACHE_PREFIX = "mcstatus-api:status:v2:"
+CACHE_PREFIX = "mcstatus-api:status:v1:"
 CACHE_TTL_SECONDS = 10
 
 
