@@ -10,16 +10,14 @@ from typing import Any, AsyncIterator
 
 from dns.exception import DNSException
 from dns.resolver import NXDOMAIN, NoAnswer
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.inmemory import InMemoryBackend
-from fastapi_cache.backends.redis import RedisBackend
-from fastapi_cache.decorator import cache
 from mcstatus import JavaServer
 from mcstatus.address import Address
 from redis import asyncio as aioredis
+
+from app.cache import MemoryCacheBackend, RedisCacheBackend, StatusCache
 
 CACHE_TTL_SECONDS = 60
 QUERY_TIMEOUT_SECONDS = 3
@@ -33,25 +31,27 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     cache_backend = os.getenv("CACHE_BACKEND", "redis")
     redis = None
 
     if cache_backend == "memory":
-        backend = InMemoryBackend()
+        backend = MemoryCacheBackend()
     elif cache_backend == "redis":
         redis_url = os.getenv("REDIS_URL", "redis://localhost")
         redis = aioredis.from_url(redis_url)
-        backend = RedisBackend(redis)
+        backend = RedisCacheBackend(redis)
     else:
         raise ValueError("CACHE_BACKEND must be 'memory' or 'redis'")
 
+    status_cache = StatusCache(backend, expire=CACHE_TTL_SECONDS)
     try:
-        FastAPICache.init(backend, prefix="mcstatus-api-cache")
+        application.state.status_cache = status_cache
         yield
     finally:
+        await status_cache.close()
         if redis is not None:
-            await redis.close()
+            await redis.close(close_connection_pool=True)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -71,7 +71,6 @@ async def internal_error_handler(request: Request, exc: Exception) -> JSONRespon
     return JSONResponse(
         status_code=500,
         content={"detail": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
-        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -112,21 +111,25 @@ async def query_status(address: str):
 
 @app.get(
     "/java/{address}",
+    response_model=JavaServerResponse,
     responses={
         400: {"description": "Invalid target address (INVALID_ADDRESS)"},
         502: {"description": "Protocol or lookup infrastructure error (UPSTREAM_ERROR)"},
         500: {"description": "Internal API error (INTERNAL_ERROR)"},
     },
 )
-@cache(expire=CACHE_TTL_SECONDS, namespace="java-status")
-async def get_java_server(address: str) -> JavaServerResponse:
+async def get_java_server(address: str, request: Request) -> Response:
+    status_cache = request.app.state.status_cache
+    return await status_cache.respond(address, build_java_server_response)
+
+
+async def build_java_server_response(address: str) -> JavaServerResponse:
     try:
         Address.parse_address(address, default_port=JavaServer.DEFAULT_PORT)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail={"code": "INVALID_ADDRESS", "message": "Invalid Minecraft server address"},
-            headers={"Cache-Control": "no-store"},
         ) from exc
 
     try:
@@ -153,7 +156,6 @@ async def get_java_server(address: str) -> JavaServerResponse:
         raise HTTPException(
             status_code=502,
             detail={"code": "UPSTREAM_ERROR", "message": "Failed to query Minecraft server status"},
-            headers={"Cache-Control": "no-store"},
         ) from exc
 
     # Preserve the status structure and serialize invalid latency as null.

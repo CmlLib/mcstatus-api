@@ -3,17 +3,17 @@ import json
 import logging
 import socket
 import unittest
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import httpx
 from dns.resolver import NXDOMAIN, NoNameservers
 from fastapi.encoders import jsonable_encoder
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.inmemory import InMemoryBackend
 from mcstatus import JavaServer
 from mcstatus.status_response import JavaStatusResponse
 
 from app import main as api
+from app.cache import MemoryCacheBackend, StatusCache
 
 RAW_STATUS = {
     "version": {"name": "1.21.1", "protocol": 767},
@@ -23,16 +23,14 @@ RAW_STATUS = {
 ADDRESS = "example.com:25565"
 
 
-class TestCache(InMemoryBackend):
-    """Advance time explicitly to verify expiration through the real cache decorator."""
+class TestCache(MemoryCacheBackend):
+    """Advance time explicitly to test expiration without waiting."""
 
     def __init__(self):
-        self._store = {}
-        self._lock = asyncio.Lock()
         self.now = 1000
+        super().__init__(clock=self.current_time)
 
-    @property
-    def _now(self):
+    def current_time(self):
         return self.now
 
 
@@ -66,10 +64,15 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         log_level = root_logger.level
         root_logger.setLevel(logging.WARNING)
         self.addCleanup(root_logger.setLevel, log_level)
-        FastAPICache.reset()
-        self.addCleanup(FastAPICache.reset)
         self.backend = TestCache()
-        FastAPICache.init(self.backend, prefix="test-cache")
+        cache_patch = patch.object(
+            api.app.state,
+            "status_cache",
+            StatusCache(self.backend),
+            create=True,
+        )
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
         self.status = JavaStatusResponse.build(RAW_STATUS, latency=12.75)
         self.server = JavaServer("127.0.0.1", 25565)
         self.server.async_status = AsyncMock(return_value=self.status)
@@ -106,8 +109,9 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_latency_is_null_but_server_stays_online(self):
         for latency in (None, float("nan"), float("inf"), -1, "unknown", True):
             with self.subTest(latency=latency):
+                self.backend._store.clear()
                 self.status.latency = latency
-                response = await self.request(headers={"Cache-Control": "no-store"})
+                response = await self.request()
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.json()["result"])
                 self.assertIsNone(response.json()["status"]["latency"])
@@ -121,8 +125,9 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_connection_failure_and_timeout_are_offline(self):
         for error in (ConnectionRefusedError("refused"), TimeoutError("timed out"), NXDOMAIN()):
             with self.subTest(error=type(error).__name__):
+                self.backend._store.clear()
                 self.lookup.side_effect = error
-                response = await self.request(headers={"Cache-Control": "no-store"})
+                response = await self.request()
                 self.assertEqual(response.status_code, 200)
                 data = response.json()
                 self.assertFalse(data["result"])
@@ -134,7 +139,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         response = await self.request()
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["detail"]["code"], "INTERNAL_ERROR")
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertNotIn("Cache-Control", response.headers)
         self.assertNotIn("result", response.json())
         self.assertNotIn("private", response.text)
         self.assertEqual(self.backend._store, {})
@@ -150,7 +155,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.request()
                 self.assertEqual(response.status_code, 502)
                 self.assertEqual(response.json()["detail"]["code"], "UPSTREAM_ERROR")
-                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertNotIn("Cache-Control", response.headers)
                 self.assertNotIn("result", response.json())
                 self.assertEqual(self.backend._store, {})
 
@@ -166,19 +171,21 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cache_reuses_latency_timestamp_and_expires(self):
         first = await self.request()
-        self.assertEqual(first.headers["X-FastAPI-Cache"], "MISS")
-        self.assertEqual(first.headers["Cache-Control"], "max-age=60")
+        self.assertEqual(first.headers["X-Cache"], "MISS")
+        created_at = first.headers["X-Cache-Created-At"]
+        self.assertIsNotNone(datetime.fromisoformat(created_at).tzinfo)
         self.status.latency = 99
         self.backend.now += 59
         cached = await self.request()
-        self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
-        self.assertEqual(cached.headers["Cache-Control"], "max-age=1")
+        self.assertEqual(cached.headers["X-Cache"], "HIT")
+        self.assertEqual(cached.headers["X-Cache-Created-At"], created_at)
         self.assertEqual(cached.json(), first.json())
         self.lookup.assert_awaited_once()
 
         self.backend.now += 2
         refreshed = await self.request()
-        self.assertEqual(refreshed.headers["X-FastAPI-Cache"], "MISS")
+        self.assertEqual(refreshed.headers["X-Cache"], "MISS")
+        self.assertNotEqual(refreshed.headers["X-Cache-Created-At"], created_at)
         self.assertEqual(refreshed.json()["status"]["latency"], 99)
         self.assertNotEqual(refreshed.json()["timestamp"], first.json()["timestamp"])
         self.assertEqual(self.lookup.await_count, 2)
@@ -189,7 +196,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.lookup.side_effect = None
         cached = await self.request()
         self.assertEqual(cached.json(), offline.json())
-        self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
+        self.assertEqual(cached.headers["X-Cache"], "HIT")
         self.lookup.assert_awaited_once()
 
         self.backend.now += 61
@@ -204,30 +211,62 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cached.json()["status"]["latency"])
         self.lookup.assert_awaited_once()
 
-    async def test_conditional_cache_hit_returns_304(self):
-        first = await self.request()
-        cached = await self.request(headers={"If-None-Match": first.headers["ETag"]})
-        self.assertEqual(cached.status_code, 304)
-        self.assertEqual(cached.content, b"")
-        self.lookup.assert_awaited_once()
+    async def test_request_cache_headers_do_not_change_server_cache_policy(self):
+        for directive in ("no-cache", "no-store", "max-age=0, No-Cache, No-Store"):
+            with self.subTest(directive=directive):
+                self.backend._store.clear()
+                self.lookup.reset_mock()
+                self.status.latency = 12.75
+                headers = {
+                    "Cache-Control": directive,
+                    "Pragma": "no-cache",
+                    "If-None-Match": "*",
+                    "If-Modified-Since": "Wed, 01 Jan 2020 00:00:00 GMT",
+                }
+                first = await self.request(headers=headers)
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(first.headers["X-Cache"], "MISS")
+                self.status.latency = 99
+                cached = await self.request(headers=headers)
+
+                self.assertEqual(cached.status_code, 200)
+                self.assertEqual(cached.headers["X-Cache"], "HIT")
+                self.assertEqual(cached.json(), first.json())
+                self.assertEqual(
+                    cached.headers["X-Cache-Created-At"],
+                    first.headers["X-Cache-Created-At"],
+                )
+                self.lookup.assert_awaited_once()
+
+                for response in (first, cached):
+                    self.assertEqual(
+                        set(response.headers),
+                        {"content-type", "content-length", "x-cache", "x-cache-created-at"},
+                    )
 
     async def test_redis_read_failure_falls_back_to_actual_probe(self):
-        with patch.object(self.backend, "get_with_ttl", AsyncMock(side_effect=ConnectionError())):
-            with self.assertLogs("fastapi_cache.decorator", level="WARNING"):
+        with patch.object(self.backend, "get", AsyncMock(side_effect=ConnectionError())):
+            with self.assertLogs("app.cache", level="WARNING"):
                 response = await self.request()
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["result"])
+        self.assertEqual(response.headers["X-Cache"], "BYPASS")
+        self.assertNotIn("Cache-Control", response.headers)
+        self.assertNotIn("X-Cache-Created-At", response.headers)
         self.lookup.assert_awaited_once()
 
     async def test_redis_write_failure_keeps_actual_result(self):
         with patch.object(self.backend, "set", AsyncMock(side_effect=ConnectionError())):
-            with self.assertLogs("fastapi_cache.decorator", level="WARNING"):
+            with self.assertLogs("app.cache", level="WARNING"):
                 response = await self.request()
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["result"])
         self.assertEqual(response.json()["status"]["latency"], 12.75)
+        self.assertEqual(response.headers["X-Cache"], "BYPASS")
+        self.assertNotIn("Cache-Control", response.headers)
+        self.assertNotIn("X-Cache-Created-At", response.headers)
 
     async def test_dns_is_included_in_total_timeout(self):
         async def stalled_lookup(*args, **kwargs):
@@ -262,7 +301,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(response.json()["result"])
                 self.assertIsNone(response.json()["status"])
                 self.assertEqual(cached.json(), response.json())
-                self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
+                self.assertEqual(cached.headers["X-Cache"], "HIT")
                 connection.assert_awaited_once()
 
     async def test_temporary_system_dns_failure_is_not_offline_or_cached(self):
@@ -275,7 +314,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"]["code"], "UPSTREAM_ERROR")
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertNotIn("Cache-Control", response.headers)
         self.assertEqual(self.backend._store, {})
 
     async def request_real_status(self, raw):
@@ -322,7 +361,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
 
         cached = await self.request()
         self.assertEqual(cached.json(), response.json())
-        self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
+        self.assertEqual(cached.headers["X-Cache"], "HIT")
         self.lookup.assert_awaited_once()
 
     async def test_real_malformed_status_is_upstream_error_and_not_cached(self):
@@ -336,7 +375,7 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.request_real_status(raw)
                 self.assertEqual(response.status_code, 502)
                 self.assertEqual(response.json()["detail"]["code"], "UPSTREAM_ERROR")
-                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertNotIn("Cache-Control", response.headers)
                 self.assertEqual(self.backend._store, {})
 
     async def test_real_minecraft_status_exchange_measures_latency_without_ping(self):
