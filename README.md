@@ -49,7 +49,6 @@ docker compose down
 | 400 | 잘못된 대상 주소 |
 | 502 | DNS 환경 또는 서버 응답 오류 |
 | 500 | API 내부 오류 |
-| 304 | 조건부 요청의 캐시 적중. 이전 응답 재사용 |
 
 `status.latency`는 API 서버에서 Minecraft 서버까지의 status 응답 시간(ms)이며, 측정값이 없으면 `null`입니다. `timestamp`는 조회 완료 시각(UTC)입니다. HTTP 오류를 Minecraft 서버의 오프라인 상태로 판단하지 마세요.
 
@@ -58,8 +57,7 @@ docker compose down
 - DNS 조회와 status 요청을 합쳐 3초로 제한합니다.
 - 접속 가능·불가 결과를 선택한 백엔드에 60초 캐싱합니다. 캐시 응답은 기존 측정값과 시각을 유지합니다.
 - 4xx/5xx 오류는 캐싱하지 않습니다.
-- `X-Cache: HIT/MISS/BYPASS`로 캐시 재사용·신규 저장·우회를 구분합니다. 기존 `X-FastAPI-Cache`도 같은 값을 제공합니다.
+- `X-Cache: HIT/MISS/BYPASS`로 캐시 재사용·신규 저장·우회를 구분합니다.
 - `X-Cache-Created-At`은 캐시 저장 시각(UTC)이며 HIT에서도 유지됩니다. 저장하지 않은 응답에는 포함하지 않습니다.
-- `Cache-Control: max-age=<남은 초>`와 `ETag`를 제공합니다. 조건부 요청은 304를 반환할 수 있습니다.
-- 요청의 `Cache-Control: no-cache`는 재조회 후 캐시를 갱신하며, `no-store`는 캐시 조회·저장을 모두 생략합니다.
+- 요청의 캐시 지시어와 조건부 요청 헤더는 무시하며, 항상 서버의 60초 TTL을 따릅니다.
 - Redis 읽기·쓰기 실패는 로그에 기록하며, 캐시 없이 실제 조회 결과를 반환합니다.

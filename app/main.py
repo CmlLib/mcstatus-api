@@ -69,7 +69,6 @@ async def internal_error_handler(request: Request, exc: Exception) -> JSONRespon
     return JSONResponse(
         status_code=500,
         content={"detail": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
-        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -119,7 +118,7 @@ async def query_status(address: str):
 )
 async def get_java_server(address: str, request: Request) -> Response:
     status_cache = request.app.state.status_cache
-    return await status_cache.respond(address, request, build_java_server_response)
+    return await status_cache.respond(address, build_java_server_response)
 
 
 async def build_java_server_response(address: str) -> JavaServerResponse:
@@ -129,7 +128,6 @@ async def build_java_server_response(address: str) -> JavaServerResponse:
         raise HTTPException(
             status_code=400,
             detail={"code": "INVALID_ADDRESS", "message": "Invalid Minecraft server address"},
-            headers={"Cache-Control": "no-store"},
         ) from exc
 
     try:
@@ -156,7 +154,6 @@ async def build_java_server_response(address: str) -> JavaServerResponse:
         raise HTTPException(
             status_code=502,
             detail={"code": "UPSTREAM_ERROR", "message": "Failed to query Minecraft server status"},
-            headers={"Cache-Control": "no-store"},
         ) from exc
 
     # Preserve the status structure and serialize invalid latency as null.

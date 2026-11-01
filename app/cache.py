@@ -1,14 +1,13 @@
 import hashlib
 import json
 import logging
-import math
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Protocol
 
-from fastapi import Request, Response
+from fastapi import Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from redis import asyncio as aioredis
@@ -21,12 +20,6 @@ CACHE_PREFIX = "mcstatus-api:status:v1:"
 class CacheEntry:
     body: bytes
     created_at: datetime
-
-    @property
-    def etag(self) -> str:
-        body_hash = hashlib.sha256(self.body)
-        digest = body_hash.hexdigest()
-        return f'W/"{digest}"'
 
     def encode(self) -> str:
         return json.dumps({
@@ -48,7 +41,7 @@ class CacheEntry:
 
 
 class CacheBackend(Protocol):
-    async def get(self, key: str) -> tuple[int, CacheEntry | None]:
+    async def get(self, key: str) -> CacheEntry | None:
         ...
 
     async def set(self, key: str, entry: CacheEntry, expire: int) -> None:
@@ -68,19 +61,18 @@ class MemoryCacheBackend:
         self._max_entries = max_entries
         self._clock = clock
 
-    async def get(self, key: str) -> tuple[int, CacheEntry | None]:
+    async def get(self, key: str) -> CacheEntry | None:
         value = self._store.get(key)
         if value is None:
-            return 0, None
+            return None
 
         deadline, entry = value
-        remaining = deadline - self._clock()
-        if remaining <= 0:
+        if deadline <= self._clock():
             del self._store[key]
-            return 0, None
+            return None
 
         self._store.move_to_end(key)
-        return math.floor(remaining), entry
+        return entry
 
     async def set(self, key: str, entry: CacheEntry, expire: int) -> None:
         now = self._clock()
@@ -102,43 +94,15 @@ class RedisCacheBackend:
     def __init__(self, redis: aioredis.Redis):
         self.redis = redis
 
-    async def get(self, key: str) -> tuple[int, CacheEntry | None]:
-        # Read the payload and its TTL atomically so they refer to the same value.
-        async with self.redis.pipeline(transaction=True) as pipeline:
-            pipeline.get(CACHE_PREFIX + key)
-            pipeline.pttl(CACHE_PREFIX + key)
-            value, ttl_ms = await pipeline.execute()
+    async def get(self, key: str) -> CacheEntry | None:
+        value = await self.redis.get(CACHE_PREFIX + key)
+        if value is None:
+            return None
 
-        if value is None or ttl_ms <= 0:
-            return 0, None
-
-        return ttl_ms // 1000, CacheEntry.decode(value)
+        return CacheEntry.decode(value)
 
     async def set(self, key: str, entry: CacheEntry, expire: int) -> None:
         await self.redis.set(CACHE_PREFIX + key, entry.encode(), ex=expire)
-
-
-def request_cache_directives(request: Request) -> set[str]:
-    directives = set()
-    for value in request.headers.getlist("Cache-Control"):
-        for directive in value.split(","):
-            name, _, _ = directive.partition("=")
-            name = name.strip()
-            directives.add(name.lower())
-
-    return directives
-
-
-def matches_etag(request: Request, etag: str) -> bool:
-    for value in request.headers.getlist("If-None-Match"):
-        for candidate in value.split(","):
-            candidate = candidate.strip()
-            if candidate == "*":
-                return True
-            if candidate.removeprefix("W/") == etag.removeprefix("W/"):
-                return True
-
-    return False
 
 
 class StatusCache:
@@ -149,32 +113,24 @@ class StatusCache:
     async def respond(
         self,
         address: str,
-        request: Request,
         query: Callable[[str], Awaitable[object]],
     ) -> Response:
-        directives = request_cache_directives(request)
-        bypass = "no-store" in directives
         address_hash = hashlib.sha256(address.encode("utf-8"))
         cache_key = address_hash.hexdigest()
+        read_failed = False
 
-        if not bypass and "no-cache" not in directives:
-            try:
-                ttl, entry = await self.backend.get(cache_key)
-            except Exception:
-                logger.warning("Cache read failed; querying server directly", exc_info=True)
-                bypass = True
-            else:
-                if entry is not None:
-                    return self.cached_response(
-                        entry,
-                        ttl,
-                        "HIT",
-                        request,
-                    )
+        try:
+            entry = await self.backend.get(cache_key)
+        except Exception:
+            logger.warning("Cache read failed; querying server directly", exc_info=True)
+            read_failed = True
+        else:
+            if entry is not None:
+                return self.cached_response(entry, "HIT")
 
         result = await query(address)
         body = JSONResponse(jsonable_encoder(result)).body
-        if bypass:
+        if read_failed:
             return self.bypass_response(body)
 
         entry = CacheEntry(body=body, created_at=datetime.now(timezone.utc))
@@ -184,12 +140,7 @@ class StatusCache:
             logger.warning("Cache write failed; returning uncached result", exc_info=True)
             return self.bypass_response(body)
 
-        return self.cached_response(
-            entry,
-            self.expire,
-            "MISS",
-            request,
-        )
+        return self.cached_response(entry, "MISS")
 
     @staticmethod
     def bypass_response(body: bytes) -> Response:
@@ -198,26 +149,16 @@ class StatusCache:
             media_type="application/json",
             headers={
                 "X-Cache": "BYPASS",
-                "X-FastAPI-Cache": "BYPASS",
-                "Cache-Control": "no-store",
             },
         )
 
     @staticmethod
     def cached_response(
         entry: CacheEntry,
-        ttl: int,
         cache_status: str,
-        request: Request,
     ) -> Response:
         headers = {
             "X-Cache": cache_status,
-            "X-FastAPI-Cache": cache_status,
             "X-Cache-Created-At": entry.created_at.isoformat(),
-            "Cache-Control": f"max-age={ttl}",
-            "ETag": entry.etag,
         }
-        if matches_etag(request, entry.etag):
-            return Response(status_code=304, headers=headers)
-
         return Response(content=entry.body, media_type="application/json", headers=headers)

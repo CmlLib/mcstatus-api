@@ -52,8 +52,8 @@ class CacheBackendTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first.status_code, 200)
         self.assertTrue(first.json()["result"])
-        self.assertEqual(first.headers["X-FastAPI-Cache"], "MISS")
-        self.assertEqual(cached.headers["X-FastAPI-Cache"], "HIT")
+        self.assertEqual(first.headers["X-Cache"], "MISS")
+        self.assertEqual(cached.headers["X-Cache"], "HIT")
         self.assertEqual(cached.json(), first.json())
         lookup.assert_awaited_once()
 
