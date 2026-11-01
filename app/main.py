@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi_cache import FastAPICache
+from fastapi_cache.backends.inmemory import InMemoryBackend
 from fastapi_cache.backends.redis import RedisBackend
 from fastapi_cache.decorator import cache
 from mcstatus import JavaServer
@@ -33,13 +34,24 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    redis_url = os.getenv("REDIS_URL", "redis://localhost")
-    redis = aioredis.from_url(redis_url)
-    FastAPICache.init(RedisBackend(redis), prefix="mcstatus-api-cache")
+    cache_backend = os.getenv("CACHE_BACKEND", "redis")
+    redis = None
+
+    if cache_backend == "memory":
+        backend = InMemoryBackend()
+    elif cache_backend == "redis":
+        redis_url = os.getenv("REDIS_URL", "redis://localhost")
+        redis = aioredis.from_url(redis_url)
+        backend = RedisBackend(redis)
+    else:
+        raise ValueError("CACHE_BACKEND must be 'memory' or 'redis'")
+
     try:
+        FastAPICache.init(backend, prefix="mcstatus-api-cache")
         yield
     finally:
-        await redis.close()
+        if redis is not None:
+            await redis.close()
 
 
 app = FastAPI(lifespan=lifespan)

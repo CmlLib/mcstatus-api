@@ -1,6 +1,6 @@
 # MCStatus API
 
-Minecraft Java 서버의 접속 가능 여부와 상태를 조회하는 API입니다. Python 3.10과 Redis를 사용합니다.
+Minecraft Java 서버의 접속 가능 여부와 상태를 조회하는 API입니다. Python 3.10을 사용하며, Redis 또는 인메모리 캐시를 선택할 수 있습니다.
 
 ## 실행·배포
 
@@ -13,7 +13,18 @@ docker compose up -d
 
 API는 `8000` 포트에서 실행됩니다. 코드 변경 후에는 이미지를 다시 빌드하고 같은 명령으로 컨테이너를 갱신합니다.
 
-환경 변수 `REDIS_URL`로 Redis 연결 주소를 지정합니다. 기본값은 `redis://localhost`이며, 제공된 `compose.yml`은 `redis://redis:6379`로 설정합니다.
+| 환경 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `CACHE_BACKEND` | `redis` | `redis` 또는 `memory`. 다른 값이면 시작 실패 |
+| `REDIS_URL` | `redis://localhost` | Redis 선택 시 연결 주소. Compose에서는 `redis://redis:6379` |
+
+Redis 없이 인메모리 캐시로 API만 실행하려면 다음 명령을 사용합니다.
+
+```bash
+CACHE_BACKEND=memory docker compose up -d mcstatus-api
+```
+
+인메모리 캐시는 프로세스별로 독립적이며 재시작하면 초기화됩니다. 만료 항목은 해당 키를 다시 조회할 때 삭제되며, 용량 제한은 없습니다.
 
 ```bash
 # 상태 및 로그 확인
@@ -45,7 +56,7 @@ docker compose down
 ## 조회·캐시 동작
 
 - DNS 조회와 status 요청을 합쳐 3초로 제한합니다.
-- 접속 가능·불가 결과를 Redis에 60초 캐싱합니다. 캐시 응답은 기존 측정값과 시각을 유지합니다.
+- 접속 가능·불가 결과를 선택한 백엔드에 60초 캐싱합니다. 캐시 응답은 기존 측정값과 시각을 유지합니다.
 - 4xx/5xx 오류는 캐싱하지 않습니다.
 - `X-FastAPI-Cache: HIT/MISS`로 캐시 사용 여부를 확인할 수 있습니다.
 - Redis 읽기·쓰기 실패는 로그에 기록하며, 캐시 없이 실제 조회 결과를 반환합니다.
