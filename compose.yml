@@ -2,6 +2,7 @@ services:
   mcstatus-api:
     image: ksi12345ab/mcstatus-api
     environment:
+      - CACHE_BACKEND=${CACHE_BACKEND:-redis}
       - REDIS_URL=redis://redis:6379
     ports:
       - "8000:8000"
